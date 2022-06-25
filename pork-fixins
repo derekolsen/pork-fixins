@@ -1,0 +1,146 @@
+#!/bin/bash
+# dynamic dns script for porkbun
+
+VERSION=0.1
+
+read -r -d '' USAGE << EOM
+pork-fixins - Simple Porkbun dynamic DNS [version $VERSION]
+
+Usage:  pork-fixins [OPTIONS] FQDN
+
+Options:
+  -v, --verbose   
+  -f, --json      Keyfile [pb_keys.json]
+  -H, --hosts     Directory of host files [pbhosts]
+  -t, --ttl       Time-To-Live (TTL) [600]
+  -V, --version
+  -h, --help
+
+The FQDN must only include one subdomain,
+a second-level domain (SLD), and
+a top-level domain (TLD), i.e. \`www.example.com\`
+
+The keyfile should be JSON:
+
+  {
+    "secretapikey": "YOUR_SECRET_API_KEY",
+    "apikey": "YOUR_API_KEY"
+  }
+EOM
+
+if [[ -z $1 ]]; then
+  echo "$USAGE"
+  exit
+fi
+
+log() {
+  echo "[$(date +'%D %T')] pork-fixins: $1"
+}
+
+command -v curl >/dev/null 2>&1 || { echo >&2 "curl is not installed.  Aborting."; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo >&2 "jq is not installed.  Aborting."; exit 1; }
+
+KEYFILE=pb_keys.json
+TTL=600
+PBHOSTS=pbhosts
+
+while [[ "$1" =~ ^- && ! "$1" == "--" ]]; do case $1 in
+  -V | --version )
+    echo $VERSION
+    exit
+    ;;
+  -f | --json )
+    shift; KEYFILE=$1
+    ;;
+  -H | --hosts )
+    shift
+    if [[ ! -d $1 ]]; then
+      log "'$1' is not a directory"
+      exit 1
+    fi
+    PBHOSTS=$1
+    ;;
+  -t | --ttl )
+    shift; TTL=$1
+    ;;
+  -h | --help )
+    echo "$USAGE"
+    exit 2
+    ;;
+  -v | --verbose )
+    VERBOSE=1
+    ;;
+esac; shift; done
+if [[ "$1" == '--' ]]; then shift; fi
+
+FQDN=$1
+shift
+
+if [[ -n $1 ]]; then
+  log "Too many arguments!"
+  exit 1
+fi
+
+if [[ -e $KEYFILE ]]; then
+  PB_APIKEY=$(jq -c -M -r .apikey $KEYFILE)
+  PB_SECRET=$(jq -c -M -r .secretapikey $KEYFILE)
+else
+  log "Keyfile ($KEYFILE) not found!"
+  exit 1
+fi
+
+IFS=. read -ra FQDNA <<< $FQDN
+
+if [[ ${#FQDNA[@]} != 3 ]]; then
+  log "Invalid FQDN!"
+  exit 1
+fi
+
+SUB=${FQDNA[0]}
+SLD=${FQDNA[1]}
+TLD=${FQDNA[2]}
+
+if [[ -n $VERBOSE ]]; then log "Attemping to contact porkbun's API to find your public IP"; fi
+
+PB_PING_RES=$(curl -s https://api-ipv4.porkbun.com/api/json/v3/ping -H 'Content-Type: application/json' -d @$KEYFILE)
+PB_PING_STATUS=$(printf $PB_PING_RES | jq -c -M -r .status)
+PB_PING_IP=$(printf $PB_PING_RES | jq -c -M -r .yourIp)
+
+if [[ -n $VERBOSE ]]; then log "$PB_PING_RES"; fi
+
+if [[ $PB_PING_STATUS != "SUCCESS" || $PB_PING_IP == "null" || -z $PB_PING_IP ]]; then
+  log "Porkbun ping API is down!"
+  exit 3
+fi
+
+if [[ ! -d $PBHOSTS ]]; then
+  if [[ -n $VERBOSE ]]; then log "Creating folder '$PBHOSTS'"; fi
+  mkdir $PBHOSTS
+fi
+
+if [[ -e $PBHOSTS/$FQDN && $(cat $PBHOSTS/$FQDN) == $PB_PING_IP ]]; then
+  if [[ -n $VERBOSE ]]; then log "Public IP unchanged; exiting"; fi
+  exit 0
+fi
+
+if [[ ! -e $PBHOSTS/$FQDN ]]; then
+  log "Creating address file in '$PBHOSTS/$FQDN'"
+else
+  log "Address changed! $(cat $PBHOSTS/$FQDN) => $PB_PING_IP"
+fi
+
+printf $PB_PING_IP > $PBHOSTS/$FQDN
+
+NEW_RECORD="{\"secretapikey\": \"$PB_SECRET\", \"apikey\": \"$PB_APIKEY\", \"content\": \"$PB_PING_IP\", \"ttl\": \"$TTL\"}"
+
+log "Attempting to update $FQDN to $PB_PING_IP with TTL $TTL"
+
+PB_EDIT_RES=$(curl -s https://porkbun.com/api/json/v3/dns/editByNameType/$SLD.$TLD/A/$SUB\
+  -H 'Content-Type: application/json'\
+  -d "$NEW_RECORD")
+
+if [[ -z $PB_EDIT_RES ]]; then
+  log "curl was unable to contact porkbun.com"
+else
+  log "$PB_EDIT_RES"
+fi
