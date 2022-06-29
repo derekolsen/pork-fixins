@@ -9,6 +9,7 @@ By default, `pork-fixins` keeps files nearby in `pbhosts`
 to detect when your ISP changes your public IP address.
 
 ## Requirements
+- bash
 - curl
 - jq
 
