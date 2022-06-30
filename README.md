@@ -1,5 +1,5 @@
 # pork-fixins
-Simple Porkbun dynamic DNS intended for use in home servers.
+Simple Porkbun dynamic DNS client intended for use in home servers.
 
 Currently, this script only updates an existing 'A' record.
 In the future, this will be expanded to automatically create
